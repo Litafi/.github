@@ -1,0 +1,22 @@
+name: Verify Runner Ruby
+description: Require the runner image to contain the Ruby declared by the project
+
+runs:
+  using: composite
+
+  steps:
+    - name: Verify mise
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v mise
+        mise --version
+
+    - name: Require declared Ruby in runner image
+      shell: bash
+      env:
+        MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        mise install --dry-run-code ruby
+        mise exec -- ruby --version

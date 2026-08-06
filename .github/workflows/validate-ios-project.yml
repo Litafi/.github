@@ -1,0 +1,54 @@
+name: Validate iOS Project
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact caller-repository commit SHA to validate.
+        required: true
+        type: string
+      project_name:
+        description: Project name without the .xcodeproj extension.
+        required: true
+        type: string
+      scheme:
+        description: Xcode scheme to build.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate-ios-project:
+    name: Validate iOS Project
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+
+    steps:
+      - name: Check Out iOS Project
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify Runner
+        uses: Litafi/.github/.github/actions/validate-ios-project/1-verify-runner-ruby@main
+
+      - name: Set Up iOS Project
+        uses: Litafi/.github/.github/actions/validate-ios-project/2-setup-ios-project@main
+
+      - name: Build iOS Project
+        uses: Litafi/.github/.github/actions/validate-ios-project/3-build-ios-project@main
+        with:
+          project_name: ${{ inputs.project_name }}
+          scheme: ${{ inputs.scheme }}
+
+      - name: Run iOS Project Tests
+        uses: Litafi/.github/.github/actions/validate-ios-project/4-run-ios-project-tests@main
+
+      - name: Lint iOS Project
+        uses: Litafi/.github/.github/actions/validate-ios-project/5-lint-ios-project@main

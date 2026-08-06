@@ -1,0 +1,45 @@
+name: Verify GitFlow Merge Candidate
+description: Enforce the feature/* to main pull-request contract before GitHub squash merge
+
+inputs:
+  source-branch:
+    description: Pull-request source branch name.
+    required: true
+  source-ref:
+    description: Git ref or SHA identifying the checked-out pull-request source.
+    required: false
+    default: HEAD
+  target-branch:
+    description: Pull-request target branch. Must be main.
+    required: false
+    default: main
+  target-ref:
+    description: Git ref or SHA identifying the current target tip.
+    required: false
+    default: refs/remotes/origin/main
+  working-directory:
+    description: Git working tree containing the fetched source and target history.
+    required: false
+    default: .
+
+runs:
+  using: composite
+
+  steps:
+    - name: Verify GitFlow merge candidate
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SOURCE_BRANCH: ${{ inputs.source-branch }}
+        SOURCE_REF: ${{ inputs.source-ref }}
+        TARGET_BRANCH: ${{ inputs.target-branch }}
+        TARGET_REF: ${{ inputs.target-ref }}
+        VERIFY_MERGE_CANDIDATE: ${{ github.action_path }}/../../../scripts/gitflow/verify_merge_candidate
+      run: |
+        set -euo pipefail
+
+        "${VERIFY_MERGE_CANDIDATE}" \
+          --source-branch "${SOURCE_BRANCH}" \
+          --source-ref "${SOURCE_REF}" \
+          --target-branch "${TARGET_BRANCH}" \
+          --target-ref "${TARGET_REF}"

@@ -1,0 +1,10 @@
+name: Lint iOS Project
+description: Run the iOS project's lint and static validation
+
+runs:
+  using: composite
+
+  steps:
+    - name: Lint iOS Project
+      shell: bash
+      run: echo "Not Yet Implemented"

@@ -1,0 +1,126 @@
+name: Setup iOS Project
+description: Install and verify the iOS project's locked Ruby dependencies
+
+runs:
+  using: composite
+
+  steps:
+    - name: Resolve Locked Bundler Version
+      id: bundler
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f Gemfile ]]; then
+          echo "::error::Gemfile is required."
+          exit 1
+        fi
+
+        if [[ ! -f Gemfile.lock ]]; then
+          echo "::error::Gemfile.lock is required."
+          exit 1
+        fi
+
+        bundler_version="$(
+          awk '
+            /^BUNDLED WITH$/ {
+              getline
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+              print
+              exit
+            }
+          ' Gemfile.lock
+        )"
+
+        if [[ -z "$bundler_version" ]]; then
+          echo "::error::Gemfile.lock does not declare a BUNDLED WITH version."
+          exit 1
+        fi
+
+        lockfile_sha="$(
+          shasum -a 256 Gemfile.lock |
+            awk '{print $1}'
+        )"
+
+        echo "version=$bundler_version" >> "$GITHUB_OUTPUT"
+        echo "lockfile_sha=$lockfile_sha" >> "$GITHUB_OUTPUT"
+
+        echo "Locked Bundler version: $bundler_version"
+
+    - name: Install Locked Bundler
+      shell: bash
+      env:
+        BUNDLER_VERSION: ${{ steps.bundler.outputs.version }}
+      run: |
+        set -euo pipefail
+
+        if mise exec -- gem list \
+          --installed \
+          --exact \
+          --version "$BUNDLER_VERSION" \
+          bundler >/dev/null
+        then
+          echo "Bundler $BUNDLER_VERSION is already installed."
+        else
+          mise exec -- gem install bundler \
+            --version "$BUNDLER_VERSION" \
+            --no-document
+        fi
+
+    - name: Verify Bundler Configuration
+      shell: bash
+      env:
+        BUNDLER_VERSION: ${{ steps.bundler.outputs.version }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f .bundle/config ]]; then
+          echo "::error::.bundle/config is required."
+          exit 1
+        fi
+
+        bundler_config="$(
+          mise exec -- bundle "_${BUNDLER_VERSION}_" config list
+        )"
+
+        printf '%s\n' "$bundler_config"
+
+        if ! grep -Fq ".bundle/config" <<< "$bundler_config"; then
+          echo "::error::Bundler did not load the project-local .bundle/config."
+          exit 1
+        fi
+
+    - name: Install Locked Gems
+      shell: bash
+      env:
+        BUNDLE_FROZEN: "true"
+        BUNDLER_VERSION: ${{ steps.bundler.outputs.version }}
+      run: |
+        set -euo pipefail
+
+        mise exec -- bundle "_${BUNDLER_VERSION}_" install
+
+    - name: Verify iOS Project Dependencies
+      shell: bash
+      env:
+        BUNDLER_VERSION: ${{ steps.bundler.outputs.version }}
+        EXPECTED_LOCKFILE_SHA: ${{ steps.bundler.outputs.lockfile_sha }}
+      run: |
+        set -euo pipefail
+
+        mise exec -- ruby --version
+        mise exec -- bundle "_${BUNDLER_VERSION}_" --version
+        mise exec -- bundle "_${BUNDLER_VERSION}_" check
+
+        actual_lockfile_sha="$(
+          shasum -a 256 Gemfile.lock |
+            awk '{print $1}'
+        )"
+
+        if [[ "$actual_lockfile_sha" != "$EXPECTED_LOCKFILE_SHA" ]]; then
+          echo "::error::Setup modified Gemfile.lock."
+          exit 1
+        fi
+
+        project_name="${GITHUB_REPOSITORY#*/}"
+        echo "$project_name dependencies are installed and verified."

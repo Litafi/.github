@@ -1,0 +1,68 @@
+name: Create Deployment Tag
+description: Create and verify one immutable annotated deployment tag in the calling repository
+
+inputs:
+  github-token:
+    description: Litafi Deployment Tagger installation token with Contents write access.
+    required: true
+  repository:
+    description: Calling repository in owner/repository format.
+    required: true
+  version:
+    description: Deployment version in X.Y.Z format.
+    required: true
+  caller-ref:
+    description: Git ref from which the reusable workflow was invoked.
+    required: true
+  caller-sha:
+    description: Exact commit SHA from which the reusable workflow was invoked.
+    required: true
+
+outputs:
+  deployment_tag:
+    description: Created immutable deployment tag.
+    value: ${{ steps.create.outputs.deployment_tag }}
+  deployment_commit_sha:
+    description: Current main commit identified by the created tag.
+    value: ${{ steps.create.outputs.deployment_commit_sha }}
+  app_version:
+    description: Application version derived from the deployment tag.
+    value: ${{ steps.create.outputs.app_version }}
+  tag_object_sha:
+    description: Git object SHA of the created annotated tag.
+    value: ${{ steps.create.outputs.tag_object_sha }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Create immutable annotated deployment tag
+      id: create
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPOSITORY: ${{ inputs.repository }}
+        VERSION: ${{ inputs.version }}
+        CALLER_REF: ${{ inputs.caller-ref }}
+        CALLER_SHA: ${{ inputs.caller-sha }}
+        CREATE_DEPLOYMENT_TAG: ${{ github.action_path }}/../../../scripts/gitflow/create_deployment_tag
+      run: |
+        set -euo pipefail
+
+        output="$(
+          "${CREATE_DEPLOYMENT_TAG}" \
+            --repository "${REPOSITORY}" \
+            --version "${VERSION}" \
+            --caller-ref "${CALLER_REF}" \
+            --caller-sha "${CALLER_SHA}"
+        )"
+
+        printf '%s\n' "${output}"
+
+        while IFS='=' read -r name value; do
+          case "${name}" in
+            deployment_tag|deployment_commit_sha|app_version|tag_object_sha)
+              printf '%s=%s\n' "${name}" "${value}" >> "${GITHUB_OUTPUT}"
+              ;;
+          esac
+        done <<< "${output}"

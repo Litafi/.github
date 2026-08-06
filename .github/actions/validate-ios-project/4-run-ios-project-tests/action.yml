@@ -1,0 +1,10 @@
+name: Run iOS Project Tests
+description: Run the iOS project's automated tests
+
+runs:
+  using: composite
+
+  steps:
+    - name: Run iOS Project Tests
+      shell: bash
+      run: echo "Not Yet Implemented"

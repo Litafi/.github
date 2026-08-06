@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly PROGRAM_NAME="$(basename "$0")"
+readonly API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
+readonly ACCEPT_HEADER="Accept: application/vnd.github+json"
+readonly VERSION_HEADER="X-GitHub-Api-Version: ${API_VERSION}"
+readonly REQUIRED_DEFAULT_BRANCH="main"
+
+usage() {
+  cat <<USAGE
+Usage:
+  ${PROGRAM_NAME} \
+    --repository <owner/repository> \
+    --version X.Y.Z \
+    --caller-ref refs/heads/main \
+    --caller-sha <40-character-sha>
+
+Validates the caller repository and creates one immutable annotated
+deploy/vX.Y.Z tag at the exact current main commit through the GitHub Git
+Database API.
+
+GH_TOKEN must contain a Litafi Deployment Tagger installation token with
+Contents: write access to the target repository.
+USAGE
+}
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_value() {
+  local option="$1"
+  local value="${2:-}"
+
+  [[ -n "${value}" ]] || fail "${option} requires a value."
+}
+
+api_request() {
+  gh api \
+    --hostname github.com \
+    -H "${ACCEPT_HEADER}" \
+    -H "${VERSION_HEADER}" \
+    "$@"
+}
+
+json_string() {
+  local expression="$1"
+  local label="$2"
+  local document="$3"
+  local value
+
+  value="$(jq -er "${expression} | select(type == \"string\" and length > 0)" <<< "${document}")" ||
+    fail "GitHub did not return ${label}."
+
+  printf '%s\n' "${value}"
+}
+
+read_main_sha() {
+  local repository="$1"
+  local response
+  local sha
+
+  response="$(api_request "repos/${repository}/git/ref/heads/${REQUIRED_DEFAULT_BRANCH}")" ||
+    fail "Unable to resolve refs/heads/${REQUIRED_DEFAULT_BRANCH} in ${repository}."
+
+  sha="$(json_string '.object.sha' "the current main commit SHA" "${response}")"
+
+  [[ "${sha}" =~ ^[0-9a-fA-F]{40}$ ]] ||
+    fail "GitHub returned an invalid main commit SHA: '${sha}'."
+
+  printf '%s\n' "${sha,,}"
+}
+
+repository=""
+version=""
+caller_ref=""
+caller_sha=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repository)
+      require_value "$1" "${2:-}"
+      repository="$2"
+      shift 2
+      ;;
+    --version)
+      require_value "$1" "${2:-}"
+      version="$2"
+      shift 2
+      ;;
+    --caller-ref)
+      require_value "$1" "${2:-}"
+      caller_ref="$2"
+      shift 2
+      ;;
+    --caller-sha)
+      require_value "$1" "${2:-}"
+      caller_sha="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "Unknown argument: $1"
+      ;;
+  esac
+done
+
+command -v gh >/dev/null 2>&1 || fail "gh is required."
+command -v jq >/dev/null 2>&1 || fail "jq is required."
+
+[[ -n "${GH_TOKEN:-}" ]] || fail "GH_TOKEN is required."
+[[ "${repository}" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] ||
+  fail "Repository must match owner/repository; got '${repository}'."
+[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+  fail "Version must match X.Y.Z; got '${version}'."
+[[ "${caller_ref}" == "refs/heads/${REQUIRED_DEFAULT_BRANCH}" ]] ||
+  fail "Create Deployment Tag must be invoked from refs/heads/${REQUIRED_DEFAULT_BRANCH}; got '${caller_ref}'."
+[[ "${caller_sha}" =~ ^[0-9a-fA-F]{40}$ ]] ||
+  fail "Caller SHA must contain exactly 40 hexadecimal characters."
+
+caller_sha="${caller_sha,,}"
+deployment_tag="deploy/v${version}"
+
+repository_json="$(api_request "repos/${repository}")" ||
+  fail "Unable to read repository metadata for ${repository}."
+default_branch="$(json_string '.default_branch' "the repository default branch" "${repository_json}")"
+
+[[ "${default_branch}" == "${REQUIRED_DEFAULT_BRANCH}" ]] ||
+  fail "Repository default branch must be '${REQUIRED_DEFAULT_BRANCH}'; got '${default_branch}'."
+
+main_sha="$(read_main_sha "${repository}")"
+
+[[ "${main_sha}" == "${caller_sha}" ]] ||
+  fail "Caller SHA '${caller_sha}' is not the current main tip '${main_sha}'. Run tag creation again from current main."
+
+matching_refs_json="$(api_request "repos/${repository}/git/matching-refs/tags/${deployment_tag}")" ||
+  fail "Unable to verify whether ${deployment_tag} already exists in ${repository}."
+
+jq -e 'type == "array"' <<< "${matching_refs_json}" >/dev/null ||
+  fail "GitHub returned an invalid matching-refs response for ${deployment_tag}."
+
+if jq -e \
+  --arg ref "refs/tags/${deployment_tag}" \
+  'any(.[]; .ref == $ref)' \
+  <<< "${matching_refs_json}" >/dev/null
+then
+  fail "${deployment_tag} already exists in ${repository} and may not be reused."
+fi
+
+# Re-read main immediately before mutation. If main advanced after this workflow
+# began, no deployment tag ref is created.
+current_main_sha="$(read_main_sha "${repository}")"
+
+[[ "${current_main_sha}" == "${caller_sha}" ]] ||
+  fail "Main advanced from '${caller_sha}' to '${current_main_sha}' before tag creation. Run tag creation again from current main."
+
+tag_message="Deployment candidate ${deployment_tag} at ${caller_sha} from approved main history."
+
+tag_payload="$(
+  jq -n \
+    --arg tag "${deployment_tag}" \
+    --arg message "${tag_message}" \
+    --arg object "${caller_sha}" \
+    '{
+      tag: $tag,
+      message: $message,
+      object: $object,
+      type: "commit"
+    }'
+)"
+
+tag_object_json="$(
+  api_request \
+    --method POST \
+    "repos/${repository}/git/tags" \
+    --input - <<< "${tag_payload}"
+)" || fail "GitHub failed to create the annotated tag object for ${deployment_tag}."
+
+tag_object_sha="$(json_string '.sha' "the annotated tag object SHA" "${tag_object_json}")"
+tag_target_sha="$(json_string '.object.sha' "the annotated tag target SHA" "${tag_object_json}")"
+
+[[ "${tag_object_sha}" =~ ^[0-9a-fA-F]{40}$ ]] ||
+  fail "GitHub returned an invalid annotated tag object SHA: '${tag_object_sha}'."
+[[ "${tag_target_sha,,}" == "${caller_sha}" ]] ||
+  fail "Created tag object targets '${tag_target_sha}', expected '${caller_sha}'."
+
+# Confirm the selected commit is still the main tip before creating the actual
+# refs/tags/... reference. An orphaned tag object is harmless if this check
+# detects that main advanced.
+current_main_sha="$(read_main_sha "${repository}")"
+
+[[ "${current_main_sha}" == "${caller_sha}" ]] ||
+  fail "Main advanced from '${caller_sha}' to '${current_main_sha}' before the tag ref was created. No deployment tag ref was created."
+
+ref_payload="$(
+  jq -n \
+    --arg ref "refs/tags/${deployment_tag}" \
+    --arg sha "${tag_object_sha}" \
+    '{ref: $ref, sha: $sha}'
+)"
+
+created_ref_json="$(
+  api_request \
+    --method POST \
+    "repos/${repository}/git/refs" \
+    --input - <<< "${ref_payload}"
+)" || fail "GitHub failed to create refs/tags/${deployment_tag}."
+
+created_ref_name="$(json_string '.ref' "the created tag ref" "${created_ref_json}")"
+created_ref_sha="$(json_string '.object.sha' "the created tag-ref object SHA" "${created_ref_json}")"
+
+[[ "${created_ref_name}" == "refs/tags/${deployment_tag}" ]] ||
+  fail "GitHub created '${created_ref_name}', expected 'refs/tags/${deployment_tag}'."
+[[ "${created_ref_sha,,}" == "${tag_object_sha,,}" ]] ||
+  fail "Created tag ref targets '${created_ref_sha}', expected tag object '${tag_object_sha}'."
+
+verified_ref_json="$(api_request "repos/${repository}/git/ref/tags/${deployment_tag}")" ||
+  fail "GitHub failed to read back refs/tags/${deployment_tag}."
+verified_ref_sha="$(json_string '.object.sha' "the verified tag-ref object SHA" "${verified_ref_json}")"
+
+[[ "${verified_ref_sha,,}" == "${tag_object_sha,,}" ]] ||
+  fail "Verified tag ref targets '${verified_ref_sha}', expected tag object '${tag_object_sha}'."
+
+verified_tag_json="$(api_request "repos/${repository}/git/tags/${tag_object_sha}")" ||
+  fail "GitHub failed to read back annotated tag object ${tag_object_sha}."
+verified_commit_sha="$(json_string '.object.sha' "the verified deployment commit SHA" "${verified_tag_json}")"
+
+[[ "${verified_commit_sha,,}" == "${caller_sha}" ]] ||
+  fail "Verified tag targets '${verified_commit_sha}', expected '${caller_sha}'."
+
+printf 'PASS: created immutable annotated %s at %s in %s.\n' \
+  "${deployment_tag}" \
+  "${caller_sha}" \
+  "${repository}"
+printf 'deployment_tag=%s\n' "${deployment_tag}"
+printf 'deployment_commit_sha=%s\n' "${caller_sha}"
+printf 'app_version=%s\n' "${version}"
+printf 'tag_object_sha=%s\n' "${tag_object_sha,,}"

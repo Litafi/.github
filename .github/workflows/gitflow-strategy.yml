@@ -1,0 +1,56 @@
+name: gitflow-strategy
+
+on:
+  pull_request:
+  workflow_call:
+    inputs:
+      source_branch:
+        description: Exact pull-request source branch name. Must match feature/*.
+        required: true
+        type: string
+      source_ref:
+        description: Exact pull-request source commit SHA.
+        required: true
+        type: string
+      target_branch:
+        description: Exact pull-request target branch name. Must be main.
+        required: true
+        type: string
+      target_ref:
+        description: Exact target-branch commit SHA associated with the pull-request event.
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  gitflow-strategy:
+    name: GitFlow Strategy
+    if: ${{ true }}
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      SOURCE_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || inputs.source_branch }}
+      SOURCE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.source_ref }}
+      TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || inputs.target_branch }}
+      TARGET_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.target_ref }}
+
+    steps:
+      - name: Check Out Exact Source Commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify GitFlow Merge Candidate
+        uses: Litafi/.github/.github/actions/verify-gitflow-merge-candidate@main
+        with:
+          source-branch: ${{ env.SOURCE_BRANCH }}
+          source-ref: ${{ env.SOURCE_REF }}
+          target-branch: ${{ env.TARGET_BRANCH }}
+          target-ref: ${{ env.TARGET_REF }}

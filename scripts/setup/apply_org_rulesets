@@ -1,0 +1,411 @@
+#!/usr/bin/env bash
+
+# Default organization is Litafi. To set up a different organization, run:
+# GITHUB_ORGANIZATION="OtherOrg" GH_TOKEN="$(gh auth token)" ./scripts/setup/apply_organization_rulesets
+
+set -euo pipefail
+
+ORGANIZATION="${GITHUB_ORGANIZATION:-Litafi}"
+API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
+
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd "${SCRIPT_DIRECTORY}/../.." && pwd)"
+
+PROPERTIES_DIRECTORY="${PROPERTIES_DIRECTORY:-${REPOSITORY_ROOT}/.github/properties}"
+RULESETS_DIRECTORY="${RULESETS_DIRECTORY:-${REPOSITORY_ROOT}/.github/rulesets}"
+WORKFLOW_SOURCE_REPOSITORY="${GITHUB_WORKFLOW_SOURCE_REPOSITORY:-${ORGANIZATION}/.github}"
+
+WORKFLOW_SOURCE_REPOSITORY_ID=""
+WORKFLOW_SOURCE_VISIBILITY=""
+WORKFLOW_SOURCE_DEFAULT_BRANCH=""
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 ||
+    fail "Required command not found: $1"
+}
+
+run_gh_api() {
+  local description="$1"
+  shift
+
+  local output
+
+  if ! output="$(
+    gh api \
+      --hostname github.com \
+      -H 'Accept: application/vnd.github+json' \
+      -H "X-GitHub-Api-Version: ${API_VERSION}" \
+      "$@" 2>&1
+  )"; then
+    printf '%s\n' "${output}" >&2
+    fail "${description}"
+  fi
+
+  printf '%s' "${output}"
+}
+
+require_command gh
+require_command jq
+require_command find
+require_command sort
+require_command uniq
+require_command mktemp
+
+[[ -n "${GH_TOKEN:-}" ]] ||
+  fail 'GH_TOKEN is required. Run: GH_TOKEN="$(gh auth token)" ./scripts/setup/apply_organization_rulesets'
+
+[[ "${WORKFLOW_SOURCE_REPOSITORY}" =~ ^[^/]+/[^/]+$ ]] ||
+  fail "GITHUB_WORKFLOW_SOURCE_REPOSITORY must use owner/repository format; got '${WORKFLOW_SOURCE_REPOSITORY}'."
+
+run_gh_api \
+  "GH_TOKEN could not authenticate to github.com." \
+  /user >/dev/null
+
+TEMP_DIRECTORY="$(mktemp -d)"
+trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
+
+apply_custom_properties() {
+  [[ -d "${PROPERTIES_DIRECTORY}" ]] ||
+    fail "Custom-properties directory does not exist: ${PROPERTIES_DIRECTORY}"
+
+  local property_files="${TEMP_DIRECTORY}/property-files.txt"
+  local property_names="${TEMP_DIRECTORY}/property-names.txt"
+  local existing_properties="${TEMP_DIRECTORY}/existing-properties.json"
+
+  find "${PROPERTIES_DIRECTORY}" -type f -name '*.json' -print |
+    LC_ALL=C sort > "${property_files}"
+
+  [[ -s "${property_files}" ]] ||
+    fail "No .json custom-property files found under ${PROPERTIES_DIRECTORY}"
+
+  while IFS= read -r property_file; do
+    jq -e '
+      type == "object"
+      and ((keys - [
+        "allowed_values",
+        "default_value",
+        "description",
+        "property_name",
+        "required",
+        "value_type",
+        "values_editable_by"
+      ]) | length == 0)
+      and (.property_name | type == "string" and length > 0)
+      and (
+        .value_type == "string"
+        or .value_type == "single_select"
+        or .value_type == "multi_select"
+        or .value_type == "true_false"
+        or .value_type == "url"
+      )
+      and (.required | type == "boolean")
+      and (
+        (.description == null)
+        or (.description | type == "string")
+      )
+      and (
+        (.allowed_values == null)
+        or (.allowed_values | type == "array")
+      )
+      and (
+        (.values_editable_by == null)
+        or .values_editable_by == "org_actors"
+        or .values_editable_by == "org_and_repo_actors"
+      )
+    ' "${property_file}" >/dev/null ||
+      fail "Invalid organization custom-property payload: ${property_file}"
+
+    jq -r '.property_name' "${property_file}" >> "${property_names}"
+  done < "${property_files}"
+
+  local duplicate_names
+  duplicate_names="$(LC_ALL=C sort "${property_names}" | uniq -d || true)"
+
+  [[ -z "${duplicate_names}" ]] ||
+    fail "Duplicate custom-property names found in local JSON files: ${duplicate_names}"
+
+  run_gh_api \
+    "Could not list organization custom properties." \
+    --paginate \
+    --slurp \
+    "/orgs/${ORGANIZATION}/properties/schema?per_page=100" \
+    > "${existing_properties}"
+
+  local created=0
+  local updated=0
+
+  while IFS= read -r property_file; do
+    local property_name
+    local encoded_property_name
+    local relative_path
+    local payload_file
+    local exists
+
+    property_name="$(jq -r '.property_name' "${property_file}")"
+    encoded_property_name="$(
+      jq -nr --arg value "${property_name}" '$value | @uri'
+    )"
+    relative_path="${property_file#${REPOSITORY_ROOT}/}"
+    payload_file="${TEMP_DIRECTORY}/property-payload.json"
+
+    jq 'del(.property_name)' "${property_file}" > "${payload_file}"
+
+    exists="$(
+      jq -r \
+        --arg name "${property_name}" \
+        '[.[][] | select(.property_name == $name)] | length > 0' \
+        "${existing_properties}"
+    )"
+
+    if [[ "${exists}" == "true" ]]; then
+      printf 'UPDATE  custom property %s  <- %s\n' \
+        "${property_name}" \
+        "${relative_path}"
+      updated=$((updated + 1))
+    else
+      printf 'CREATE  custom property %s  <- %s\n' \
+        "${property_name}" \
+        "${relative_path}"
+      created=$((created + 1))
+    fi
+
+    run_gh_api \
+      "Could not apply custom property '${property_name}'." \
+      --method PUT \
+      "/orgs/${ORGANIZATION}/properties/schema/${encoded_property_name}" \
+      --input "${payload_file}" \
+      >/dev/null
+  done < "${property_files}"
+
+  printf '\nApplied organization custom properties to %s: %d created, %d updated.\n\n' \
+    "${ORGANIZATION}" \
+    "${created}" \
+    "${updated}"
+}
+
+resolve_workflow_source_repository() {
+  local repository_response="${TEMP_DIRECTORY}/workflow-source-repository.json"
+
+  run_gh_api \
+    "Could not resolve workflow source repository '${WORKFLOW_SOURCE_REPOSITORY}'." \
+    "/repos/${WORKFLOW_SOURCE_REPOSITORY}" \
+    > "${repository_response}"
+
+  WORKFLOW_SOURCE_REPOSITORY_ID="$(jq -r '.id' "${repository_response}")"
+  WORKFLOW_SOURCE_VISIBILITY="$(jq -r '.visibility' "${repository_response}")"
+  WORKFLOW_SOURCE_DEFAULT_BRANCH="$(jq -r '.default_branch' "${repository_response}")"
+
+  [[ "${WORKFLOW_SOURCE_REPOSITORY_ID}" =~ ^[0-9]+$ ]] ||
+    fail "Could not read the numeric repository ID for '${WORKFLOW_SOURCE_REPOSITORY}'."
+
+  [[ "${WORKFLOW_SOURCE_DEFAULT_BRANCH}" == "main" ]] ||
+    fail "Workflow source repository '${WORKFLOW_SOURCE_REPOSITORY}' must use 'main' as its default branch; got '${WORKFLOW_SOURCE_DEFAULT_BRANCH}'."
+
+  printf 'WORKFLOW SOURCE  %s  (id=%s, visibility=%s)\n' \
+    "${WORKFLOW_SOURCE_REPOSITORY}" \
+    "${WORKFLOW_SOURCE_REPOSITORY_ID}" \
+    "${WORKFLOW_SOURCE_VISIBILITY}"
+}
+
+configure_workflow_source_access() {
+  if [[ "${WORKFLOW_SOURCE_VISIBILITY}" != "private" ]]; then
+    return 0
+  fi
+
+  printf 'CONFIGURE  organization access to actions and workflows in %s\n' \
+    "${WORKFLOW_SOURCE_REPOSITORY}"
+
+  run_gh_api \
+    "Could not make '${WORKFLOW_SOURCE_REPOSITORY}' actions and workflows accessible across '${ORGANIZATION}'." \
+    --method PUT \
+    "/repos/${WORKFLOW_SOURCE_REPOSITORY}/actions/permissions/access" \
+    -f access_level=organization \
+    >/dev/null
+}
+
+validate_ruleset_workflow_paths() {
+  local ruleset_file="$1"
+  local workflow_path
+
+  while IFS= read -r workflow_path; do
+    [[ -n "${workflow_path}" ]] || continue
+    [[ -f "${REPOSITORY_ROOT}/${workflow_path}" ]] ||
+      fail "Ruleset '${ruleset_file}' references missing workflow '${workflow_path}'."
+  done < <(
+    jq -r '
+      .rules[]?
+      | select(.type == "workflows")
+      | .parameters.workflows[]?
+      | .path
+    ' "${ruleset_file}"
+  )
+}
+
+render_ruleset_payload() {
+  local ruleset_file="$1"
+  local payload_file="$2"
+
+  jq \
+    --argjson workflow_source_repository_id "${WORKFLOW_SOURCE_REPOSITORY_ID}" \
+    '
+      .rules |= map(
+        if .type == "workflows" then
+          .parameters.workflows |= map(
+            if .repository_id == 0 then
+              .repository_id = $workflow_source_repository_id
+            else
+              .
+            end
+          )
+        else
+          .
+        end
+      )
+    ' \
+    "${ruleset_file}" \
+    > "${payload_file}"
+
+  jq -e '
+    [
+      .rules[]?
+      | select(.type == "workflows")
+      | .parameters.workflows[]?
+      | select(.repository_id == 0)
+    ]
+    | length == 0
+  ' "${payload_file}" >/dev/null ||
+    fail "Ruleset '${ruleset_file}' contains an unresolved workflow repository ID."
+}
+
+apply_rulesets() {
+  [[ -d "${RULESETS_DIRECTORY}" ]] ||
+    fail "Rulesets directory does not exist: ${RULESETS_DIRECTORY}"
+
+  local ruleset_files="${TEMP_DIRECTORY}/ruleset-files.txt"
+  local ruleset_names="${TEMP_DIRECTORY}/ruleset-names.txt"
+  local existing_rulesets="${TEMP_DIRECTORY}/existing-rulesets.json"
+
+  find "${RULESETS_DIRECTORY}" -type f -name '*.json' -print |
+    LC_ALL=C sort > "${ruleset_files}"
+
+  [[ -s "${ruleset_files}" ]] ||
+    fail "No .json ruleset files found under ${RULESETS_DIRECTORY}"
+
+  while IFS= read -r ruleset_file; do
+    jq -e '
+      type == "object"
+      and ((keys - [
+        "bypass_actors",
+        "conditions",
+        "enforcement",
+        "name",
+        "rules",
+        "target"
+      ]) | length == 0)
+      and (.name | type == "string" and length > 0)
+      and (.target | type == "string" and length > 0)
+      and (.enforcement | type == "string" and length > 0)
+      and ((.bypass_actors // []) | type == "array")
+      and (.conditions | type == "object")
+      and (.rules | type == "array")
+    ' "${ruleset_file}" >/dev/null ||
+      fail "Invalid organization ruleset payload: ${ruleset_file}"
+
+    validate_ruleset_workflow_paths "${ruleset_file}"
+    jq -r '.name' "${ruleset_file}" >> "${ruleset_names}"
+  done < "${ruleset_files}"
+
+  local duplicate_names
+  duplicate_names="$(LC_ALL=C sort "${ruleset_names}" | uniq -d || true)"
+
+  [[ -z "${duplicate_names}" ]] ||
+    fail "Duplicate ruleset names found in local JSON files: ${duplicate_names}"
+
+  run_gh_api \
+    "Could not list organization rulesets." \
+    --paginate \
+    --slurp \
+    "/orgs/${ORGANIZATION}/rulesets?per_page=100" \
+    > "${existing_rulesets}"
+
+  local created=0
+  local updated=0
+
+  while IFS= read -r ruleset_file; do
+    local ruleset_name
+    local relative_path
+    local matching_ids
+    local match_count
+    local ruleset_id
+    local payload_file
+
+    ruleset_name="$(jq -r '.name' "${ruleset_file}")"
+    relative_path="${ruleset_file#${REPOSITORY_ROOT}/}"
+    payload_file="${TEMP_DIRECTORY}/ruleset-${ruleset_name//[^A-Za-z0-9._-]/_}.json"
+
+    render_ruleset_payload "${ruleset_file}" "${payload_file}"
+
+    matching_ids="$(
+      jq -c \
+        --arg name "${ruleset_name}" \
+        '[.[][] | select(.name == $name) | .id]' \
+        "${existing_rulesets}"
+    )"
+
+    match_count="$(jq -r 'length' <<< "${matching_ids}")"
+
+    case "${match_count}" in
+      0)
+        printf 'CREATE  ruleset %s  <- %s\n' \
+          "${ruleset_name}" \
+          "${relative_path}"
+
+        run_gh_api \
+          "Could not create ruleset '${ruleset_name}'." \
+          --method POST \
+          "/orgs/${ORGANIZATION}/rulesets" \
+          --input "${payload_file}" \
+          >/dev/null
+
+        created=$((created + 1))
+        ;;
+
+      1)
+        ruleset_id="$(jq -r '.[0]' <<< "${matching_ids}")"
+
+        printf 'UPDATE  ruleset %s  (id=%s) <- %s\n' \
+          "${ruleset_name}" \
+          "${ruleset_id}" \
+          "${relative_path}"
+
+        run_gh_api \
+          "Could not update ruleset '${ruleset_name}'." \
+          --method PUT \
+          "/orgs/${ORGANIZATION}/rulesets/${ruleset_id}" \
+          --input "${payload_file}" \
+          >/dev/null
+
+        updated=$((updated + 1))
+        ;;
+
+      *)
+        fail "Organization has multiple rulesets named '${ruleset_name}'. Resolve the duplicate names before applying."
+        ;;
+    esac
+  done < "${ruleset_files}"
+
+  printf '\nApplied organization rulesets to %s: %d created, %d updated.\n' \
+    "${ORGANIZATION}" \
+    "${created}" \
+    "${updated}"
+}
+
+apply_custom_properties
+resolve_workflow_source_repository
+configure_workflow_source_access
+apply_rulesets

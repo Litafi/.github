@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PROGRAM_NAME="$(basename "$0")"
+
+usage() {
+  cat <<USAGE
+Usage:
+  ${PROGRAM_NAME} \
+    --source-branch <feature/...> \
+    [--source-ref <git-ref-or-sha>] \
+    --target-branch main \
+    [--target-ref <git-ref-or-sha>]
+
+Validates the pull-request branch state that GitHub may squash-merge.
+
+Policy:
+  * Only feature/* pull requests may target main.
+  * The source must include the current main tip.
+  * The source range may contain multiple review/WIP commits.
+  * The source range must contain no merge commits.
+  * GitHub must create the final main commit with squash merge.
+USAGE
+}
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_value() {
+  local option="$1"
+  local value="${2:-}"
+  [[ -n "${value}" ]] || fail "${option} requires a value."
+}
+
+resolve_commit() {
+  local ref="$1"
+  local label="$2"
+  local commit
+
+  commit="$(git rev-parse --verify "${ref}^{commit}" 2>/dev/null)" ||
+    fail "Unable to resolve ${label} '${ref}' to a commit."
+  printf '%s\n' "${commit}"
+}
+
+resolve_default_target_ref() {
+  local candidate
+
+  for candidate in \
+    refs/remotes/origin/main \
+    origin/main \
+    refs/heads/main \
+    main
+  do
+    if git rev-parse --verify "${candidate}^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  fail "Unable to locate target branch 'main'. Pass --target-ref explicitly."
+}
+
+source_branch=""
+source_ref="HEAD"
+target_branch=""
+target_ref=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source-branch)
+      require_value "$1" "${2:-}"
+      source_branch="$2"
+      shift 2
+      ;;
+    --source-ref)
+      require_value "$1" "${2:-}"
+      source_ref="$2"
+      shift 2
+      ;;
+    --target-branch)
+      require_value "$1" "${2:-}"
+      target_branch="$2"
+      shift 2
+      ;;
+    --target-ref)
+      require_value "$1" "${2:-}"
+      target_ref="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "Unknown argument: $1"
+      ;;
+  esac
+done
+
+command -v git >/dev/null 2>&1 || fail "git is required."
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Run this command inside a Git work tree."
+
+if [[ -z "${source_branch}" ]]; then
+  source_branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+fi
+
+[[ -n "${source_branch}" ]] || fail "Pass --source-branch when HEAD is detached."
+[[ "${source_branch}" =~ ^feature/.+ ]] ||
+  fail "Only feature/* pull requests may target main; got '${source_branch}'."
+[[ "${target_branch}" == "main" ]] ||
+  fail "Only main is a valid pull-request target; got '${target_branch:-<empty>}'."
+
+if [[ -z "${target_ref}" ]]; then
+  target_ref="$(resolve_default_target_ref)"
+fi
+
+source_commit="$(resolve_commit "${source_ref}" "source ref")"
+target_commit="$(resolve_commit "${target_ref}" "target ref")"
+
+[[ "${source_commit}" != "${target_commit}" ]] ||
+  fail "Source branch '${source_branch}' contains no commit beyond 'main'."
+
+if ! git merge-base --is-ancestor "${target_commit}" "${source_commit}"; then
+  cat >&2 <<MESSAGE
+ERROR: '${source_branch}' is not based on the current 'main' tip.
+Rebase it onto ${target_commit}, push with --force-with-lease, and let every
+required check pass again before squash merging.
+
+Target commit: ${target_commit}
+Source commit: ${source_commit}
+MESSAGE
+  exit 1
+fi
+
+commit_count="$(git rev-list --count "${target_commit}..${source_commit}")"
+merge_commits="$(git rev-list --merges "${target_commit}..${source_commit}")"
+
+if [[ -n "${merge_commits}" ]]; then
+  cat >&2 <<MESSAGE
+ERROR: Merge commits are not permitted in '${source_branch}'.
+Rebase the branch so its pull-request range is linear. GitHub will squash the
+${commit_count} linear commit(s) into one new commit on 'main'.
+
+Merge commits found:
+${merge_commits}
+MESSAGE
+  exit 1
+fi
+
+cat <<MESSAGE
+PASS: '${source_branch}' is eligible to target 'main'.
+
+target_branch=main
+target_commit=${target_commit}
+source_branch=${source_branch}
+source_commit=${source_commit}
+linear_commit_count=${commit_count}
+required_merge_method=squash
+MESSAGE
