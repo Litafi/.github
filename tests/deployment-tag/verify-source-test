@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TEST_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd "${TEST_DIRECTORY}/../.." && pwd)"
+VERIFY_SOURCE="${REPOSITORY_ROOT}/scripts/deployment-tag/verify-source"
+# shellcheck source=test-helper
+source "${TEST_DIRECTORY}/test-helper"
+
+TEMP_DIRECTORY="$(mktemp -d)"
+trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
+
+cd "${TEMP_DIRECTORY}"
+git init -q
+git config user.name 'Deployment Tag Tests'
+git config user.email 'deployment-tag-tests@example.invalid'
+
+echo first > app.txt
+git add app.txt
+git commit -qm 'first'
+first_sha="$(git rev-parse HEAD)"
+git update-ref refs/remotes/origin/main "${first_sha}"
+git tag -a deploy/v1.2.3 -m 'deployment tag' "${first_sha}"
+
+current_output="$("${VERIFY_SOURCE}" \
+  --tag deploy/v1.2.3 \
+  --main-ref refs/remotes/origin/main \
+  --require-current-main-tip)"
+assert_contains "${current_output}" "deployment_commit_sha=${first_sha}" 'Current-main tag must expose its commit'
+assert_contains "${current_output}" 'app_version=1.2.3' 'Valid tag must expose its app version'
+assert_contains "${current_output}" 'deployment_source_branch=main' 'Valid tag must identify main as its source'
+
+echo second >> app.txt
+git add app.txt
+git commit -qm 'second'
+second_sha="$(git rev-parse HEAD)"
+git update-ref refs/remotes/origin/main "${second_sha}"
+
+ancestor_output="$("${VERIFY_SOURCE}" \
+  --tag deploy/v1.2.3 \
+  --main-ref refs/remotes/origin/main)"
+assert_contains "${ancestor_output}" "deployment_commit_sha=${first_sha}" 'Immutable ancestor tag must remain valid after main advances'
+
+assert_command_fails \
+  'An ancestor tag must fail when current main tip is required.' \
+  "${VERIFY_SOURCE}" \
+  --tag deploy/v1.2.3 \
+  --main-ref refs/remotes/origin/main \
+  --require-current-main-tip
+
+git checkout -q --orphan outside-main
+git rm -q -rf .
+echo outside > outside.txt
+git add outside.txt
+git commit -qm 'outside main'
+outside_sha="$(git rev-parse HEAD)"
+git tag -a deploy/v2.0.0 -m 'outside main' "${outside_sha}"
+
+assert_command_fails \
+  'A deployment tag outside current main history must fail.' \
+  "${VERIFY_SOURCE}" \
+  --tag deploy/v2.0.0 \
+  --main-ref refs/remotes/origin/main
+
+assert_command_fails \
+  'A malformed deployment tag must fail.' \
+  "${VERIFY_SOURCE}" \
+  --tag release/v1.2.3 \
+  --main-ref refs/remotes/origin/main
+
+print_test_summary 'deployment-tag source verification'
