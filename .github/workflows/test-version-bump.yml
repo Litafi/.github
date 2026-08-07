@@ -1,0 +1,34 @@
+name: Test Version Bump
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/version-bump/**"
+      - ".github/workflows/detect-version-bump.yml"
+      - ".github/workflows/test-version-bump.yml"
+      - "scripts/version-bump/**"
+      - "tests/version-bump/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/actions/version-bump/**"
+      - ".github/workflows/detect-version-bump.yml"
+      - ".github/workflows/test-version-bump.yml"
+      - "scripts/version-bump/**"
+      - "tests/version-bump/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test-version-bump:
+    name: Test Version Bump
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Litafi/.github
+        uses: actions/checkout@v5
+
+      - name: Run Version Bump Tests
+        run: ./tests/version-bump/run

@@ -1,0 +1,53 @@
+name: Detect Version Bump
+description: Detect whether the repository-root VERSION file changed across a main update
+
+inputs:
+  previous-ref:
+    description: Git ref or SHA identifying main before the update.
+    required: true
+  current-ref:
+    description: Git ref or SHA identifying main after the update.
+    required: true
+
+outputs:
+  version_changed:
+    description: Whether VERSION changed between the two commits.
+    value: ${{ steps.detect.outputs.version_changed }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Detect VERSION Change
+      id: detect
+      shell: bash
+      env:
+        PREVIOUS_REF: ${{ inputs.previous-ref }}
+        CURRENT_REF: ${{ inputs.current-ref }}
+        DETECT_VERSION_BUMP: ${{ github.action_path }}/../../../../scripts/version-bump/detect
+      run: |
+        set -euo pipefail
+
+        output="$(
+          "${DETECT_VERSION_BUMP}" \
+            --previous-ref "${PREVIOUS_REF}" \
+            --current-ref "${CURRENT_REF}"
+        )"
+
+        printf '%s\n' "${output}"
+
+        version_changed="$(
+          printf '%s\n' "${output}" |
+            sed -n 's/^version_changed=//p' |
+            tail -n 1
+        )"
+
+        case "${version_changed}" in
+          true|false)
+            printf 'version_changed=%s\n' "${version_changed}" >> "${GITHUB_OUTPUT}"
+            ;;
+          *)
+            echo "Version-bump detection did not return version_changed=true|false." >&2
+            exit 1
+            ;;
+        esac

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly PROGRAM_NAME="$(basename "$0")"
+readonly VERSION_FILE="VERSION"
+
+usage() {
+  cat <<USAGE
+Usage:
+  ${PROGRAM_NAME} --previous-ref <git-ref-or-sha> --current-ref <git-ref-or-sha>
+
+Detects whether the repository-root VERSION file changed between two commits.
+An unchanged VERSION means the main update was not a version-bump merge.
+USAGE
+}
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_value() {
+  [[ -n "${2:-}" ]] || fail "$1 requires a value."
+}
+
+previous_ref=""
+current_ref=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --previous-ref)
+      require_value "$1" "${2:-}"
+      previous_ref="$2"
+      shift 2
+      ;;
+    --current-ref)
+      require_value "$1" "${2:-}"
+      current_ref="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "Unknown argument: $1"
+      ;;
+  esac
+done
+
+command -v git >/dev/null 2>&1 || fail "git is required."
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Run this command inside a Git work tree."
+
+[[ -n "${previous_ref}" ]] || fail "--previous-ref is required."
+[[ -n "${current_ref}" ]] || fail "--current-ref is required."
+
+previous_commit="$(git rev-parse --verify "${previous_ref}^{commit}" 2>/dev/null)" ||
+  fail "Unable to resolve previous commit '${previous_ref}'."
+current_commit="$(git rev-parse --verify "${current_ref}^{commit}" 2>/dev/null)" ||
+  fail "Unable to resolve current commit '${current_ref}'."
+
+git cat-file -e "${current_commit}:${VERSION_FILE}" 2>/dev/null ||
+  fail "Versioned-deployment repository must contain /${VERSION_FILE} at current commit ${current_commit}."
+
+if git diff --quiet "${previous_commit}" "${current_commit}" -- "${VERSION_FILE}"; then
+  printf 'PASS: %s is unchanged; this is not a version-bump merge.\n' "${VERSION_FILE}"
+  printf 'version_changed=false\n'
+  exit 0
+fi
+
+printf 'VERSION changed between %s and %s.\n' "${previous_commit}" "${current_commit}"
+printf 'version_changed=true\n'

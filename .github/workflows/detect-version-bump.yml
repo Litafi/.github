@@ -1,0 +1,68 @@
+name: Detect Version Bump
+
+on:
+  workflow_call:
+    inputs:
+      previous_sha:
+        description: Exact main commit SHA before the push.
+        required: true
+        type: string
+      current_sha:
+        description: Exact main commit SHA after the push.
+        required: true
+        type: string
+    outputs:
+      version_changed:
+        description: Whether the repository-root VERSION file changed.
+        value: ${{ jobs.detect-version-bump.outputs.version_changed }}
+
+permissions:
+  contents: read
+
+jobs:
+  detect-version-bump:
+    name: Detect Version Bump
+    runs-on: ubuntu-latest
+    outputs:
+      version_changed: ${{ steps.detect.outputs.version_changed }}
+
+    steps:
+      - name: Require Main Push
+        shell: bash
+        env:
+          CURRENT_SHA: ${{ inputs.current_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" != "push" ]]; then
+            echo "::error::Detect Version Bump must be called from a push event."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Detect Version Bump must be called from a push to refs/heads/main."
+            exit 1
+          fi
+
+          if [[ "${CURRENT_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::current_sha must equal the exact main push SHA."
+            exit 1
+          fi
+
+      - name: Check Out Current Main History
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.current_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect Version Bump
+        id: detect
+        uses: Litafi/.github/.github/actions/version-bump/detect@main
+        with:
+          previous-ref: ${{ inputs.previous_sha }}
+          current-ref: ${{ inputs.current_sha }}
+
+      - name: No Version Bump
+        if: ${{ steps.detect.outputs.version_changed == 'false' }}
+        run: echo "VERSION unchanged; no version-bump action is required."

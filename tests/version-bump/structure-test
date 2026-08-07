@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TEST_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd "${TEST_DIRECTORY}/../.." && pwd)"
+
+fail_test() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+assert_file_exists() {
+  [[ -f "$1" ]] || fail_test "Expected file to exist: $1"
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  [[ "${haystack}" == *"${needle}"* ]] || fail_test "${message}: missing '${needle}'"
+}
+
+cd "${REPOSITORY_ROOT}"
+
+required_paths=(
+  .github/actions/version-bump/detect/action.yml
+  .github/workflows/detect-version-bump.yml
+  scripts/version-bump/detect
+)
+
+for path in "${required_paths[@]}"; do
+  assert_file_exists "${path}"
+done
+
+workflow="$(cat .github/workflows/detect-version-bump.yml)"
+assert_contains \
+  "${workflow}" \
+  'workflow_call:' \
+  'Version-bump detection must be reusable by consumer repositories'
+assert_contains \
+  "${workflow}" \
+  'GITHUB_EVENT_NAME' \
+  'Reusable workflow must require a push event'
+assert_contains \
+  "${workflow}" \
+  'refs/heads/main' \
+  'Reusable workflow must require a main push'
+assert_contains \
+  "${workflow}" \
+  "steps.detect.outputs.version_changed == 'false'" \
+  'No-op behavior must be conditional on VERSION remaining unchanged'
+assert_contains \
+  "${workflow}" \
+  'VERSION unchanged; no version-bump action is required.' \
+  'No-op behavior must be explicit in the workflow log'
+
+if grep -q 'workflow_dispatch:' .github/workflows/detect-version-bump.yml; then
+  fail_test 'Detect Version Bump must not expose a manual workflow trigger.'
+fi
+
+if grep -q 'deployment-tag/create' .github/workflows/detect-version-bump.yml; then
+  fail_test 'VERSION detection must not create deployment tags.'
+fi
+
+printf 'PASS: version-bump structure\n'
