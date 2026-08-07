@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TEST_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+"${TEST_DIRECTORY}/structure-test"
+"${TEST_DIRECTORY}/detect-test"

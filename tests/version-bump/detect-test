@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TEST_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd "${TEST_DIRECTORY}/../.." && pwd)"
+DETECT_VERSION_BUMP="${REPOSITORY_ROOT}/scripts/version-bump/detect"
+
+fail_test() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local message="$3"
+
+  [[ "${haystack}" == *"${needle}"* ]] || fail_test "${message}: missing '${needle}'"
+}
+
+TEMP_DIRECTORY="$(mktemp -d)"
+trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
+
+create_repository() {
+  local repository="$1"
+
+  mkdir -p "${repository}"
+  git -C "${repository}" init -q
+  git -C "${repository}" config user.name 'Version Bump Test'
+  git -C "${repository}" config user.email 'version-bump-test@example.invalid'
+
+  printf '0.0.0\n' > "${repository}/VERSION"
+  printf '# Versioned deployment test\n' > "${repository}/README.md"
+  git -C "${repository}" add VERSION README.md
+  git -C "${repository}" commit -q -m 'baseline'
+}
+
+repository="${TEMP_DIRECTORY}/unchanged"
+create_repository "${repository}"
+previous_sha="$(git -C "${repository}" rev-parse HEAD)"
+
+printf '\nUnrelated main change.\n' >> "${repository}/README.md"
+git -C "${repository}" add README.md
+git -C "${repository}" commit -q -m 'unrelated change'
+current_sha="$(git -C "${repository}" rev-parse HEAD)"
+
+output="$(
+  cd "${repository}"
+  "${DETECT_VERSION_BUMP}" \
+    --previous-ref "${previous_sha}" \
+    --current-ref "${current_sha}"
+)"
+
+assert_contains \
+  "${output}" \
+  'PASS: VERSION is unchanged; this is not a version-bump merge.' \
+  'An unrelated main change must be recognized as a non-version-bump merge'
+assert_contains \
+  "${output}" \
+  'version_changed=false' \
+  'An unchanged VERSION must expose version_changed=false'
+
+printf 'PASS: unchanged VERSION is a no-op\n'
