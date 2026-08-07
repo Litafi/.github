@@ -161,7 +161,7 @@ current_main_sha="$(read_main_sha "${repository}")"
 [[ "${current_main_sha}" == "${caller_sha}" ]] ||
   fail "Main advanced from '${caller_sha}' to '${current_main_sha}' before tag creation. Run tag creation again from current main."
 
-tag_message="Deployment candidate ${deployment_tag} at ${caller_sha} from approved main history."
+tag_message="Deployment tag ${deployment_tag} at ${caller_sha} from approved main history."
 
 tag_payload="$(
   jq -n \

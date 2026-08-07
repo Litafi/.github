@@ -1,0 +1,99 @@
+name: Capture Deployment Identity
+description: Validate an immutable deploy/vX.Y.Z tag, its checked-out commit, and its approved main-history source
+
+inputs:
+  deployment-tag:
+    description: Deployment tag in deploy/vX.Y.Z format. Defaults to GITHUB_REF_NAME.
+    required: false
+    default: ""
+  working-directory:
+    description: Git working tree containing the checked-out deployment tag and fetched main history.
+    required: false
+    default: "."
+
+outputs:
+  deployment_tag:
+    description: Validated immutable deployment tag.
+    value: ${{ steps.capture.outputs.deployment_tag }}
+  deployment_commit_sha:
+    description: Immutable commit SHA identified by the tag.
+    value: ${{ steps.capture.outputs.deployment_commit_sha }}
+  app_version:
+    description: App version parsed from the tag.
+    value: ${{ steps.capture.outputs.app_version }}
+  deployment_source_branch:
+    description: Approved source branch for the immutable tag commit.
+    value: ${{ steps.capture.outputs.deployment_source_branch }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Capture and validate immutable deployment identity
+      id: capture
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        DEPLOYMENT_TAG_INPUT: ${{ inputs.deployment-tag }}
+        VERIFY_DEPLOYMENT_TAG_SOURCE: ${{ github.action_path }}/../../../../scripts/deployment-tag/verify-source
+      run: |
+        set -euo pipefail
+
+        if [[ "${GITHUB_EVENT_NAME}" != "push" || "${GITHUB_REF_TYPE}" != "tag" ]]; then
+          echo "Capture Deployment Identity requires a tag-push event." >&2
+          exit 1
+        fi
+
+        deployment_tag="${DEPLOYMENT_TAG_INPUT:-${GITHUB_REF_NAME}}"
+        tag_ref="refs/tags/${deployment_tag}"
+
+        if ! git show-ref --verify --quiet "${tag_ref}"; then
+          echo "Deployment tag is not present in the checkout: ${deployment_tag}" >&2
+          exit 1
+        fi
+
+        policy_output="$("${VERIFY_DEPLOYMENT_TAG_SOURCE}" \
+          --tag "${deployment_tag}" \
+          --tag-ref "${tag_ref}" \
+          --main-ref refs/remotes/origin/main)"
+
+        printf '%s\n' "${policy_output}"
+
+        deployment_commit_sha="$({
+          printf '%s\n' "${policy_output}" |
+            sed -n 's/^deployment_commit_sha=//p'
+        } | tail -n 1)"
+        app_version="$({
+          printf '%s\n' "${policy_output}" |
+            sed -n 's/^app_version=//p'
+        } | tail -n 1)"
+        deployment_source_branch="$({
+          printf '%s\n' "${policy_output}" |
+            sed -n 's/^deployment_source_branch=//p'
+        } | tail -n 1)"
+
+        [[ -n "${deployment_commit_sha}" ]] || {
+          echo "Deployment policy did not return deployment_commit_sha." >&2
+          exit 1
+        }
+        [[ -n "${app_version}" ]] || {
+          echo "Deployment policy did not return app_version." >&2
+          exit 1
+        }
+        [[ "${deployment_source_branch}" == "main" ]] || {
+          echo "Deployment policy returned an unsupported source branch: ${deployment_source_branch:-<empty>}" >&2
+          exit 1
+        }
+
+        checkout_commit_sha="$(git rev-parse HEAD^{commit})"
+        if [[ "${checkout_commit_sha}" != "${deployment_commit_sha}" ]]; then
+          echo "Checked-out commit does not match ${deployment_tag}." >&2
+          echo "Tag commit:      ${deployment_commit_sha}" >&2
+          echo "Checkout commit: ${checkout_commit_sha}" >&2
+          exit 1
+        fi
+
+        echo "deployment_tag=${deployment_tag}" >> "${GITHUB_OUTPUT}"
+        echo "deployment_commit_sha=${deployment_commit_sha}" >> "${GITHUB_OUTPUT}"
+        echo "app_version=${app_version}" >> "${GITHUB_OUTPUT}"
+        echo "deployment_source_branch=${deployment_source_branch}" >> "${GITHUB_OUTPUT}"

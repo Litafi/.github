@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TEST_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd "${TEST_DIRECTORY}/../.." && pwd)"
+# shellcheck source=test-helper
+source "${TEST_DIRECTORY}/test-helper"
+
+cd "${REPOSITORY_ROOT}"
+
+required_paths=(
+  .github/actions/deployment-tag/create/action.yml
+  .github/actions/deployment-tag/capture-identity/action.yml
+  .github/workflows/create-deployment-tag.yml
+  .github/rulesets/deployment-tag/create.json
+  .github/rulesets/deployment-tag/immutability.json
+  scripts/deployment-tag/create
+  scripts/deployment-tag/verify-source
+)
+
+for path in "${required_paths[@]}"; do
+  assert_file_exists "${path}"
+done
+
+legacy_paths=(
+  .github/actions/create-deployment-tag
+  .github/actions/capture-deployment-identity
+  .github/rulesets/deployment-tag-creation.json
+  .github/rulesets/immutable-deployment-tags.json
+  scripts/gitflow/create_deployment_tag
+  scripts/gitflow/verify_deployment_tag_source
+)
+
+for path in "${legacy_paths[@]}"; do
+  assert_file_absent "${path}"
+done
+
+assert_command_succeeds \
+  'Deployment-tag rulesets must be valid JSON.' \
+  bash -c 'jq -e . .github/rulesets/deployment-tag/create.json .github/rulesets/deployment-tag/immutability.json >/dev/null'
+
+creation_rule="$(jq -r '.rules | map(.type) | join(",")' .github/rulesets/deployment-tag/create.json)"
+assert_equals 'creation' "${creation_rule}" 'Creation ruleset must govern tag creation'
+
+immutability_rules="$(jq -r '.rules | map(.type) | sort | join(",")' .github/rulesets/deployment-tag/immutability.json)"
+assert_equals 'deletion,update' "${immutability_rules}" 'Immutability ruleset must reject update and deletion'
+
+creation_pattern="$(jq -r '.conditions.ref_name.include | join(",")' .github/rulesets/deployment-tag/create.json)"
+immutability_pattern="$(jq -r '.conditions.ref_name.include | join(",")' .github/rulesets/deployment-tag/immutability.json)"
+assert_equals 'refs/tags/deploy/v*.*.*' "${creation_pattern}" 'Creation ruleset must target deployment tags'
+assert_equals "${creation_pattern}" "${immutability_pattern}" 'Both rulesets must govern the same deployment-tag namespace'
+
+workflow="$(cat .github/workflows/create-deployment-tag.yml)"
+assert_contains \
+  "${workflow}" \
+  'Litafi/.github/.github/actions/deployment-tag/create@main' \
+  'Reusable workflow must call the thematic create action'
+
+create_action="$(cat .github/actions/deployment-tag/create/action.yml)"
+assert_contains \
+  "${create_action}" \
+  '${{ github.action_path }}/../../../../scripts/deployment-tag/create' \
+  'Create action must call the thematic create script'
+
+capture_action="$(cat .github/actions/deployment-tag/capture-identity/action.yml)"
+assert_contains \
+  "${capture_action}" \
+  '${{ github.action_path }}/../../../../scripts/deployment-tag/verify-source' \
+  'Capture action must call the thematic verification script'
+assert_contains \
+  "${capture_action}" \
+  'deployment-tag:' \
+  'Capture action must expose deployment terminology'
+
+if grep -R -n -E \
+  'scripts/gitflow/(create_deployment_tag|verify_deployment_tag_source)|actions/create-deployment-tag|distribution-tag:' \
+  .github scripts >/tmp/deployment-tag-legacy-references.txt; then
+  cat /tmp/deployment-tag-legacy-references.txt >&2
+  fail_test 'Legacy deployment-tag references remain.'
+else
+  TESTS_RUN=$((TESTS_RUN + 1))
+fi
+
+if grep -R -n -i -E \
+  'deployment candidate|adhoc|testflight|deployment status' \
+  .github/actions/deployment-tag \
+  .github/rulesets/deployment-tag \
+  scripts/deployment-tag \
+  .github/workflows/create-deployment-tag.yml \
+  >/tmp/deployment-tag-boundary-violations.txt; then
+  cat /tmp/deployment-tag-boundary-violations.txt >&2
+  fail_test 'Deployment-candidate lifecycle language leaked into the deployment-tag theme.'
+else
+  TESTS_RUN=$((TESTS_RUN + 1))
+fi
+
+if grep -q 'workflow_dispatch:' .github/workflows/create-deployment-tag.yml; then
+  fail_test 'Create Deployment Tag must not expose a manual workflow trigger.'
+else
+  TESTS_RUN=$((TESTS_RUN + 1))
+fi
+
+print_test_summary 'deployment-tag structure'

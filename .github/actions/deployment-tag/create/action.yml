@@ -45,7 +45,7 @@ runs:
         VERSION: ${{ inputs.version }}
         CALLER_REF: ${{ inputs.caller-ref }}
         CALLER_SHA: ${{ inputs.caller-sha }}
-        CREATE_DEPLOYMENT_TAG: ${{ github.action_path }}/../../../scripts/gitflow/create_deployment_tag
+        CREATE_DEPLOYMENT_TAG: ${{ github.action_path }}/../../../../scripts/deployment-tag/create
       run: |
         set -euo pipefail
 

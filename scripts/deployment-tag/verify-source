@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+PROGRAM_NAME="$(basename "$0")"
+
+usage() {
+  cat <<USAGE
+Usage:
+  ${PROGRAM_NAME} --tag deploy/vX.Y.Z [--tag-ref <ref-or-sha>] \
+    [--main-ref <ref>] [--require-current-main-tip]
+
+A deployment tag is valid only when its commit belongs to current main history.
+Use --require-current-main-tip while preparing a new deployment tag. Existing
+immutable tags remain valid after main advances.
+USAGE
+}
+
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_value() {
+  [[ -n "${2:-}" ]] || fail "$1 requires a value."
+}
+
+tag=""
+tag_ref=""
+main_ref="refs/remotes/origin/main"
+require_current_main_tip=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag)
+      require_value "$1" "${2:-}"
+      tag="$2"
+      shift 2
+      ;;
+    --tag-ref)
+      require_value "$1" "${2:-}"
+      tag_ref="$2"
+      shift 2
+      ;;
+    --main-ref)
+      require_value "$1" "${2:-}"
+      main_ref="$2"
+      shift 2
+      ;;
+    --require-current-main-tip)
+      require_current_main_tip=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "Unknown argument: $1"
+      ;;
+  esac
+done
+
+command -v git >/dev/null 2>&1 || fail "git is required."
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Run this command inside a Git work tree."
+
+[[ "${tag}" =~ ^deploy/v([0-9]+\.[0-9]+\.[0-9]+)$ ]] ||
+  fail "Deployment tag must match deploy/vX.Y.Z; got '${tag}'."
+app_version="${BASH_REMATCH[1]}"
+
+[[ -n "${tag_ref}" ]] || tag_ref="refs/tags/${tag}"
+
+deployment_commit_sha="$(git rev-parse --verify "${tag_ref}^{commit}" 2>/dev/null)" ||
+  fail "Unable to resolve deployment tag ref '${tag_ref}'."
+main_commit="$(git rev-parse --verify "${main_ref}^{commit}" 2>/dev/null)" ||
+  fail "Unable to resolve current main ref '${main_ref}'."
+
+if [[ "${require_current_main_tip}" == true ]]; then
+  if [[ "${deployment_commit_sha}" != "${main_commit}" ]]; then
+    cat >&2 <<MESSAGE
+ERROR: ${tag} does not point to the current main tip.
+
+Tag commit:          ${deployment_commit_sha}
+Current main commit: ${main_commit}
+MESSAGE
+    exit 1
+  fi
+
+  printf 'PASS: %s points to current main tip %s.\n' "${tag}" "${deployment_commit_sha}"
+elif ! git merge-base --is-ancestor "${deployment_commit_sha}" "${main_commit}"; then
+  cat >&2 <<MESSAGE
+ERROR: ${tag} does not point to a commit in current main history.
+
+Tag commit:          ${deployment_commit_sha}
+Current main commit: ${main_commit}
+
+Deployment tags may identify only commits already accepted into protected main.
+Never move or reuse an existing deployment tag.
+MESSAGE
+  exit 1
+else
+  printf 'PASS: %s points to commit %s in current main history.\n' \
+    "${tag}" "${deployment_commit_sha}"
+fi
+
+printf 'deployment_tag=%s\n' "${tag}"
+printf 'deployment_commit_sha=%s\n' "${deployment_commit_sha}"
+printf 'app_version=%s\n' "${app_version}"
+printf 'deployment_source_branch=main\n'
+printf 'deployment_source_ref=%s\n' "${main_ref}"
