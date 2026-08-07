@@ -5,7 +5,6 @@
   "default_value": null,
   "description": "Classifies repositories by their organization-managed project lifecycle.",
   "allowed_values": [
-    "ios",
     "versioned-deployment"
   ],
   "values_editable_by": "org_actors"

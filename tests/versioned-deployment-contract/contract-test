@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+TEST_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd "${TEST_DIRECTORY}/../.." && pwd)"
+
+fail_test() {
+  printf 'FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+assert_jq() {
+  local description="$1"
+  local expression="$2"
+  local file="$3"
+
+  jq -e "${expression}" "${file}" >/dev/null || fail_test "${description}"
+}
+
+cd "${REPOSITORY_ROOT}"
+
+PROJECT_TYPE='.github/properties/project-type.json'
+PROJECT_PLATFORMS='.github/properties/project-platforms.json'
+IOS_RULESET='.github/rulesets/ios-project.json'
+
+assert_jq \
+  'project_type must classify the versioned deployment lifecycle only.' \
+  '.property_name == "project_type"
+   and .value_type == "single_select"
+   and .allowed_values == ["versioned-deployment"]' \
+  "${PROJECT_TYPE}"
+
+assert_jq \
+  'project_platforms must classify iOS independently of project_type.' \
+  '.property_name == "project_platforms"
+   and .value_type == "multi_select"
+   and .allowed_values == ["ios"]' \
+  "${PROJECT_PLATFORMS}"
+
+assert_jq \
+  'The iOS ruleset must target repositories by project_platforms=ios.' \
+  '.conditions.repository_property.include == [
+     {
+       "name": "project_platforms",
+       "property_values": ["ios"],
+       "source": "custom"
+     }
+   ]' \
+  "${IOS_RULESET}"
+
+if grep -R -n -F '"name": "project_type"' .github/rulesets \
+  | grep -F 'ios-project.json' >/tmp/versioned-deployment-contract-legacy-selector.txt; then
+  cat /tmp/versioned-deployment-contract-legacy-selector.txt >&2
+  fail_test 'The iOS ruleset still targets project_type.'
+fi
+
+printf 'PASS: versioned deployment property contract\n'
