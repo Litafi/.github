@@ -7,7 +7,7 @@
     "repository_property": {
       "include": [
         {
-          "name": "project_type",
+          "name": "project_platforms",
           "property_values": [
             "ios"
           ],
