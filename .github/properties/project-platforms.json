@@ -1,0 +1,11 @@
+{
+  "property_name": "project_platforms",
+  "value_type": "multi_select",
+  "required": false,
+  "default_value": null,
+  "description": "Identifies the platforms supported by a repository.",
+  "allowed_values": [
+    "ios"
+  ],
+  "values_editable_by": "org_actors"
+}
