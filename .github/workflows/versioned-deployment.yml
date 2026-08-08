@@ -1,0 +1,51 @@
+name: Versioned Deployment
+
+on:
+  workflow_call:
+    inputs:
+      app_client_id:
+        description: Client ID of the Litafi Deployment Tagger GitHub App.
+        required: true
+        type: string
+    secrets:
+      app_private_key:
+        description: PEM private key of the Litafi Deployment Tagger GitHub App.
+        required: true
+    outputs:
+      version_changed:
+        description: Whether VERSION changed in the main update.
+        value: ${{ jobs.detect-version-bump.outputs.version_changed }}
+      previous_version:
+        description: Previous version when VERSION changed.
+        value: ${{ jobs.detect-version-bump.outputs.previous_version }}
+      version:
+        description: Validated version when VERSION changed.
+        value: ${{ jobs.detect-version-bump.outputs.version }}
+      deployment_tag:
+        description: Created deployment tag when VERSION changed.
+        value: ${{ jobs.create-deployment-tag.outputs.deployment_tag }}
+      deployment_commit_sha:
+        description: Main commit identified by the created deployment tag.
+        value: ${{ jobs.create-deployment-tag.outputs.deployment_commit_sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  detect-version-bump:
+    name: Detect and Validate Version Bump
+    uses: Litafi/.github/.github/workflows/detect-version-bump.yml@main
+    with:
+      previous_sha: ${{ github.event.before }}
+      current_sha: ${{ github.sha }}
+
+  create-deployment-tag:
+    name: Create Deployment Tag for Version Bump
+    needs: detect-version-bump
+    if: ${{ needs.detect-version-bump.outputs.version_changed == 'true' }}
+    uses: Litafi/.github/.github/workflows/create-deployment-tag.yml@main
+    with:
+      version: ${{ needs.detect-version-bump.outputs.version }}
+      app_client_id: ${{ inputs.app_client_id }}
+    secrets:
+      app_private_key: ${{ secrets.app_private_key }}

@@ -27,6 +27,7 @@ cd "${REPOSITORY_ROOT}"
 required_paths=(
   .github/actions/version-bump/detect/action.yml
   .github/workflows/detect-version-bump.yml
+  .github/workflows/versioned-deployment.yml
   scripts/version-bump/detect
 )
 
@@ -34,34 +35,76 @@ for path in "${required_paths[@]}"; do
   assert_file_exists "${path}"
 done
 
-workflow="$(cat .github/workflows/detect-version-bump.yml)"
+detection_workflow="$(cat .github/workflows/detect-version-bump.yml)"
 assert_contains \
-  "${workflow}" \
+  "${detection_workflow}" \
   'workflow_call:' \
   'Version-bump detection must be reusable by consumer repositories'
 assert_contains \
-  "${workflow}" \
+  "${detection_workflow}" \
   'GITHUB_EVENT_NAME' \
   'Reusable workflow must require a push event'
 assert_contains \
-  "${workflow}" \
+  "${detection_workflow}" \
   'refs/heads/main' \
   'Reusable workflow must require a main push'
 assert_contains \
-  "${workflow}" \
+  "${detection_workflow}" \
   "steps.detect.outputs.version_changed == 'false'" \
   'No-op behavior must be conditional on VERSION remaining unchanged'
 assert_contains \
-  "${workflow}" \
-  'VERSION unchanged; no version-bump action is required.' \
-  'No-op behavior must be explicit in the workflow log'
+  "${detection_workflow}" \
+  "steps.detect.outputs.version_changed == 'true'" \
+  'Changed VERSION behavior must be explicit'
+assert_contains \
+  "${detection_workflow}" \
+  'previous_version:' \
+  'Detection must expose the previous version'
+assert_contains \
+  "${detection_workflow}" \
+  'version:' \
+  'Detection must expose the validated new version'
 
 if grep -q 'workflow_dispatch:' .github/workflows/detect-version-bump.yml; then
   fail_test 'Detect Version Bump must not expose a manual workflow trigger.'
 fi
 
 if grep -q 'deployment-tag/create' .github/workflows/detect-version-bump.yml; then
-  fail_test 'VERSION detection must not create deployment tags.'
+  fail_test 'VERSION detection must not create deployment tags directly.'
+fi
+
+orchestration_workflow="$(cat .github/workflows/versioned-deployment.yml)"
+assert_contains \
+  "${orchestration_workflow}" \
+  'Litafi/.github/.github/workflows/detect-version-bump.yml@main' \
+  'Versioned Deployment must delegate detection and validation'
+assert_contains \
+  "${orchestration_workflow}" \
+  'previous_sha: ${{ github.event.before }}' \
+  'Versioned Deployment must derive the previous commit from the main push event'
+assert_contains \
+  "${orchestration_workflow}" \
+  'current_sha: ${{ github.sha }}' \
+  'Versioned Deployment must derive the current commit from the main push event'
+assert_contains \
+  "${orchestration_workflow}" \
+  "needs.detect-version-bump.outputs.version_changed == 'true'" \
+  'Deployment-tag creation must run only for a validated VERSION change'
+assert_contains \
+  "${orchestration_workflow}" \
+  'Litafi/.github/.github/workflows/create-deployment-tag.yml@main' \
+  'Versioned Deployment must delegate deployment-tag creation'
+assert_contains \
+  "${orchestration_workflow}" \
+  'version: ${{ needs.detect-version-bump.outputs.version }}' \
+  'The GitHub App workflow must receive the validated VERSION value'
+assert_contains \
+  "${orchestration_workflow}" \
+  'app_private_key: ${{ secrets.app_private_key }}' \
+  'The GitHub App private key must be passed only as a secret'
+
+if grep -q 'workflow_dispatch:' .github/workflows/versioned-deployment.yml; then
+  fail_test 'Versioned Deployment must not expose a manual workflow trigger.'
 fi
 
 printf 'PASS: version-bump structure\n'

@@ -19,39 +19,66 @@ assert_contains() {
   [[ "${haystack}" == *"${needle}"* ]] || fail_test "${message}: missing '${needle}'"
 }
 
+assert_command_fails_with() {
+  local expected="$1"
+  shift
+  local output
+
+  if output="$($@ 2>&1)"; then
+    fail_test "Expected command to fail: $*"
+  fi
+
+  assert_contains "${output}" "${expected}" "Failed command must explain the contract violation"
+}
+
 TEMP_DIRECTORY="$(mktemp -d)"
 trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
 
 create_repository() {
   local repository="$1"
+  local version="${2:-0.0.0}"
 
   mkdir -p "${repository}"
   git -C "${repository}" init -q
   git -C "${repository}" config user.name 'Version Bump Test'
   git -C "${repository}" config user.email 'version-bump-test@example.invalid'
 
-  printf '0.0.0\n' > "${repository}/VERSION"
+  printf '%s\n' "${version}" > "${repository}/VERSION"
   printf '# Versioned deployment test\n' > "${repository}/README.md"
   git -C "${repository}" add VERSION README.md
   git -C "${repository}" commit -q -m 'baseline'
 }
 
+commit_version() {
+  local repository="$1"
+  local version="$2"
+
+  printf '%s\n' "${version}" > "${repository}/VERSION"
+  git -C "${repository}" add VERSION
+  git -C "${repository}" commit -q -m "version ${version}"
+}
+
+run_detect() {
+  local repository="$1"
+  local previous_sha="$2"
+  local current_sha="$3"
+
+  (
+    cd "${repository}"
+    "${DETECT_VERSION_BUMP}" \
+      --previous-ref "${previous_sha}" \
+      --current-ref "${current_sha}"
+  )
+}
+
 repository="${TEMP_DIRECTORY}/unchanged"
 create_repository "${repository}"
 previous_sha="$(git -C "${repository}" rev-parse HEAD)"
-
 printf '\nUnrelated main change.\n' >> "${repository}/README.md"
 git -C "${repository}" add README.md
 git -C "${repository}" commit -q -m 'unrelated change'
 current_sha="$(git -C "${repository}" rev-parse HEAD)"
-
-output="$(
-  cd "${repository}"
-  "${DETECT_VERSION_BUMP}" \
-    --previous-ref "${previous_sha}" \
-    --current-ref "${current_sha}"
-)"
-
+output="$(run_detect "${repository}" "${previous_sha}" "${current_sha}")"
 assert_contains \
   "${output}" \
   'PASS: VERSION is unchanged; this is not a version-bump merge.' \
@@ -60,5 +87,67 @@ assert_contains \
   "${output}" \
   'version_changed=false' \
   'An unchanged VERSION must expose version_changed=false'
-
 printf 'PASS: unchanged VERSION is a no-op\n'
+
+repository="${TEMP_DIRECTORY}/valid-patch"
+create_repository "${repository}"
+previous_sha="$(git -C "${repository}" rev-parse HEAD)"
+commit_version "${repository}" '0.0.1'
+current_sha="$(git -C "${repository}" rev-parse HEAD)"
+output="$(run_detect "${repository}" "${previous_sha}" "${current_sha}")"
+assert_contains "${output}" 'version_changed=true' 'A valid bump must expose version_changed=true'
+assert_contains "${output}" 'previous_version=0.0.0' 'A valid bump must expose the previous version'
+assert_contains "${output}" 'version=0.0.1' 'A valid bump must expose the requested deployment version'
+printf 'PASS: valid patch VERSION bump\n'
+
+repository="${TEMP_DIRECTORY}/valid-minor"
+create_repository "${repository}" '1.2.9'
+previous_sha="$(git -C "${repository}" rev-parse HEAD)"
+commit_version "${repository}" '1.3.0'
+current_sha="$(git -C "${repository}" rev-parse HEAD)"
+output="$(run_detect "${repository}" "${previous_sha}" "${current_sha}")"
+assert_contains "${output}" 'version=1.3.0' 'A valid minor bump must be accepted'
+printf 'PASS: valid minor VERSION bump\n'
+
+repository="${TEMP_DIRECTORY}/valid-major"
+create_repository "${repository}" '1.9.9'
+previous_sha="$(git -C "${repository}" rev-parse HEAD)"
+commit_version "${repository}" '2.0.0'
+current_sha="$(git -C "${repository}" rev-parse HEAD)"
+output="$(run_detect "${repository}" "${previous_sha}" "${current_sha}")"
+assert_contains "${output}" 'version=2.0.0' 'A valid major bump must be accepted'
+printf 'PASS: valid major VERSION bump\n'
+
+repository="${TEMP_DIRECTORY}/downgrade"
+create_repository "${repository}" '1.2.3'
+previous_sha="$(git -C "${repository}" rev-parse HEAD)"
+commit_version "${repository}" '1.2.2'
+current_sha="$(git -C "${repository}" rev-parse HEAD)"
+assert_command_fails_with \
+  'VERSION must increase; got 1.2.3 -> 1.2.2.' \
+  run_detect "${repository}" "${previous_sha}" "${current_sha}"
+printf 'PASS: VERSION downgrade rejected\n'
+
+repository="${TEMP_DIRECTORY}/malformed"
+create_repository "${repository}"
+previous_sha="$(git -C "${repository}" rev-parse HEAD)"
+printf 'v0.0.1\n' > "${repository}/VERSION"
+git -C "${repository}" add VERSION
+git -C "${repository}" commit -q -m 'malformed version'
+current_sha="$(git -C "${repository}" rev-parse HEAD)"
+assert_command_fails_with \
+  'must match X.Y.Z' \
+  run_detect "${repository}" "${previous_sha}" "${current_sha}"
+printf 'PASS: malformed VERSION rejected\n'
+
+repository="${TEMP_DIRECTORY}/extra-line"
+create_repository "${repository}"
+previous_sha="$(git -C "${repository}" rev-parse HEAD)"
+printf '0.0.1\n\n' > "${repository}/VERSION"
+git -C "${repository}" add VERSION
+git -C "${repository}" commit -q -m 'extra newline'
+current_sha="$(git -C "${repository}" rev-parse HEAD)"
+assert_command_fails_with \
+  'must contain exactly one line' \
+  run_detect "${repository}" "${previous_sha}" "${current_sha}"
+printf 'PASS: malformed VERSION file shape rejected\n'

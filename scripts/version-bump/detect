@@ -12,6 +12,8 @@ Usage:
 
 Detects whether the repository-root VERSION file changed between two commits.
 An unchanged VERSION means the main update was not a version-bump merge.
+A changed VERSION must contain a strictly increasing X.Y.Z version before it
+can be used to create a deployment tag.
 USAGE
 }
 
@@ -22,6 +24,78 @@ fail() {
 
 require_value() {
   [[ -n "${2:-}" ]] || fail "$1 requires a value."
+}
+
+read_version_at_commit() {
+  local commit="$1"
+  local label="$2"
+  local temp_file="$3"
+  local version
+  local line_count
+  local byte_count
+  local expected_byte_count
+  local final_byte
+
+  git cat-file -e "${commit}:${VERSION_FILE}" 2>/dev/null ||
+    fail "Versioned-deployment repository must contain /${VERSION_FILE} at ${label} commit ${commit}."
+
+  git show "${commit}:${VERSION_FILE}" > "${temp_file}" ||
+    fail "Unable to read /${VERSION_FILE} at ${label} commit ${commit}."
+
+  [[ -s "${temp_file}" ]] ||
+    fail "/${VERSION_FILE} at ${label} commit ${commit} is empty."
+
+  final_byte="$(tail -c 1 "${temp_file}" | od -An -t u1 | tr -d '[:space:]')"
+  [[ "${final_byte}" == "10" ]] ||
+    fail "/${VERSION_FILE} at ${label} commit ${commit} must end with exactly one newline."
+
+  line_count="$(awk 'END { print NR }' "${temp_file}")"
+  [[ "${line_count}" == "1" ]] ||
+    fail "/${VERSION_FILE} at ${label} commit ${commit} must contain exactly one line."
+
+  version="$(cat "${temp_file}")"
+  [[ "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
+    fail "/${VERSION_FILE} at ${label} commit ${commit} must match X.Y.Z; got '${version}'."
+
+  byte_count="$(wc -c < "${temp_file}" | tr -d '[:space:]')"
+  expected_byte_count=$(( ${#version} + 1 ))
+  [[ "${byte_count}" -eq "${expected_byte_count}" ]] ||
+    fail "/${VERSION_FILE} at ${label} commit ${commit} contains unexpected whitespace."
+
+  printf '%s\n' "${version}"
+}
+
+version_is_greater() {
+  local previous_version="$1"
+  local current_version="$2"
+  local previous_major previous_minor previous_patch
+  local current_major current_minor current_patch
+
+  IFS='.' read -r previous_major previous_minor previous_patch <<< "${previous_version}"
+  IFS='.' read -r current_major current_minor current_patch <<< "${current_version}"
+
+  previous_major=$((10#${previous_major}))
+  previous_minor=$((10#${previous_minor}))
+  previous_patch=$((10#${previous_patch}))
+  current_major=$((10#${current_major}))
+  current_minor=$((10#${current_minor}))
+  current_patch=$((10#${current_patch}))
+
+  if (( current_major > previous_major )); then
+    return 0
+  fi
+  if (( current_major < previous_major )); then
+    return 1
+  fi
+
+  if (( current_minor > previous_minor )); then
+    return 0
+  fi
+  if (( current_minor < previous_minor )); then
+    return 1
+  fi
+
+  (( current_patch > previous_patch ))
 }
 
 previous_ref=""
@@ -51,6 +125,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 command -v git >/dev/null 2>&1 || fail "git is required."
+command -v od >/dev/null 2>&1 || fail "od is required."
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Run this command inside a Git work tree."
 
 [[ -n "${previous_ref}" ]] || fail "--previous-ref is required."
@@ -70,5 +145,31 @@ if git diff --quiet "${previous_commit}" "${current_commit}" -- "${VERSION_FILE}
   exit 0
 fi
 
-printf 'VERSION changed between %s and %s.\n' "${previous_commit}" "${current_commit}"
+TEMP_DIRECTORY="$(mktemp -d)"
+trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
+
+previous_version="$(
+  read_version_at_commit \
+    "${previous_commit}" \
+    "previous" \
+    "${TEMP_DIRECTORY}/previous-version"
+)"
+current_version="$(
+  read_version_at_commit \
+    "${current_commit}" \
+    "current" \
+    "${TEMP_DIRECTORY}/current-version"
+)"
+
+[[ "${current_version}" != "${previous_version}" ]] ||
+  fail "/${VERSION_FILE} changed without changing its semantic version; both commits declare ${current_version}."
+
+version_is_greater "${previous_version}" "${current_version}" ||
+  fail "VERSION must increase; got ${previous_version} -> ${current_version}."
+
+printf 'PASS: VERSION changed from %s to %s; this is a valid version-bump merge.\n' \
+  "${previous_version}" \
+  "${current_version}"
 printf 'version_changed=true\n'
+printf 'previous_version=%s\n' "${previous_version}"
+printf 'version=%s\n' "${current_version}"

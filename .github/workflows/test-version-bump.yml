@@ -5,6 +5,7 @@ on:
     paths:
       - ".github/actions/version-bump/**"
       - ".github/workflows/detect-version-bump.yml"
+      - ".github/workflows/versioned-deployment.yml"
       - ".github/workflows/test-version-bump.yml"
       - "scripts/version-bump/**"
       - "tests/version-bump/**"
@@ -14,6 +15,7 @@ on:
     paths:
       - ".github/actions/version-bump/**"
       - ".github/workflows/detect-version-bump.yml"
+      - ".github/workflows/versioned-deployment.yml"
       - ".github/workflows/test-version-bump.yml"
       - "scripts/version-bump/**"
       - "tests/version-bump/**"
