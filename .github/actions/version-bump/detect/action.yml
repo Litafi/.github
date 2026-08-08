@@ -1,5 +1,5 @@
 name: Detect Version Bump
-description: Detect whether the repository-root VERSION file changed across a main update
+description: Detect and validate a repository-root VERSION change across a main update
 
 inputs:
   previous-ref:
@@ -13,12 +13,18 @@ outputs:
   version_changed:
     description: Whether VERSION changed between the two commits.
     value: ${{ steps.detect.outputs.version_changed }}
+  previous_version:
+    description: Previous X.Y.Z version when VERSION changed.
+    value: ${{ steps.detect.outputs.previous_version }}
+  version:
+    description: Validated new X.Y.Z version when VERSION changed.
+    value: ${{ steps.detect.outputs.version }}
 
 runs:
   using: composite
 
   steps:
-    - name: Detect VERSION Change
+    - name: Detect and Validate VERSION Change
       id: detect
       shell: bash
       env:
@@ -43,8 +49,33 @@ runs:
         )"
 
         case "${version_changed}" in
-          true|false)
-            printf 'version_changed=%s\n' "${version_changed}" >> "${GITHUB_OUTPUT}"
+          false)
+            printf 'version_changed=false\n' >> "${GITHUB_OUTPUT}"
+            ;;
+          true)
+            previous_version="$(
+              printf '%s\n' "${output}" |
+                sed -n 's/^previous_version=//p' |
+                tail -n 1
+            )"
+            version="$(
+              printf '%s\n' "${output}" |
+                sed -n 's/^version=//p' |
+                tail -n 1
+            )"
+
+            [[ "${previous_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "Version-bump detection did not return a valid previous_version." >&2
+              exit 1
+            }
+            [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "Version-bump detection did not return a valid version." >&2
+              exit 1
+            }
+
+            printf 'version_changed=true\n' >> "${GITHUB_OUTPUT}"
+            printf 'previous_version=%s\n' "${previous_version}" >> "${GITHUB_OUTPUT}"
+            printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
             ;;
           *)
             echo "Version-bump detection did not return version_changed=true|false." >&2
